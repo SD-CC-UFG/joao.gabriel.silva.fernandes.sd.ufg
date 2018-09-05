@@ -1,1 +1,2 @@
-# joao.gabriel.silva.fernandes.sd.ufg
+# Distributed-Server
+A distributed mutithread Server system
