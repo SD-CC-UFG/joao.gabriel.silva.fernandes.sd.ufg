@@ -5,10 +5,19 @@ class SubServer;
 
 class SubServer: public Server{
 
-    void atenderCliente(int connectionfd, sockaddr_in6 clientAddr, socklen_t addrLen);
+ 
+  protected:
+    void atenderServer(int connectionfd, int threadNumber);
+    
+    static void my_signal_handler(int s);
+    static SubServer *instance;
 
   public:
     SubServer(int porta);
-    void Start();
-    void Accept();
+    ~SubServer();
+    virtual void Start();
+    virtual void Listen(size_t listen_buffer_size = 20);
+    virtual void Accept();
+    virtual void Close();
+
 };
