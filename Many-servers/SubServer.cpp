@@ -1,3 +1,7 @@
+/** @author: João Gabriel Silva Fernandes
+ * @email: jgabsfernandes@gmail.com
+ * 
+*/
 #include "SubServer.h"
 #include <stdlib.h>
 using namespace std;
@@ -10,19 +14,26 @@ SubServer::SubServer(int porta){
     sockfd = socket(Domain, type, ipProtocol);
 
     //cancela o construtor com uma exceção
-    if (sockfd < 0)
-    {
+    if (sockfd < 0){
         perror(BOLD(RED("Erro ao criar socket\n")));
         throw("");
     }
+    
     serverAddr.sin6_family = AF_INET6;
-    // htonl() -> converte um short sem sinal de host byte order para network byte order ( o que é isso?, nao faço ideia)
+    // htonl() -> converte um short sem sinal de host byte order para network byte order
     serverAddr.sin6_port = htons((ushort)porta);
     
     //inet_pton(AF_INET6, "ipv6 que quer usar", &serverAddr.sin6_addr);
-    serverAddr.sin6_addr = in6addr_any; //ou gethostbyname("localhost");
+    serverAddr.sin6_addr = in6addr_any;
 
     cout << GRN("Socket criado") << endl;
+
+    int *on = new int;
+    *on = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, (char *)on, sizeof(int)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        exit(0);
+    }
 
     /*********configura o signal***********/
     struct sigaction sigIntHandler;
@@ -134,8 +145,8 @@ SubServer::~SubServer(){
 
 void SubServer::Close(){
     //printf("\t" BOLD("`") "->Finalizando threads 0 a %lu", Sthreads.size()-1);
-    //for (thread &thrd: Sthreads)
-    //    thrd.join();    // ou pthread_cancel(thrd.native_handle()); ... dependendo do caso
+    for (thread &thrd: Sthreads)
+        thrd.join();    // ou pthread_cancel(thrd.native_handle()); ... dependendo do caso
     close(sockfd);
     close(connectionfd);
 }

@@ -1,3 +1,7 @@
+/** @author: João Gabriel Silva Fernandes
+ * @email: jgabsfernandes@gmail.com
+ * 
+*/
 #include "Server.h"
 
 
@@ -7,18 +11,20 @@ class SuperServer;
 
 class SuperServer: public Server/*, public Client*/{
 
+    vector<bool> upServers;
     vector<int> subSockfd;
     vector<sockaddr_in6> addr;
-    int connectionsPoll;
-    //vector<queue<Client_connection>> filas;     //uma fila para cada sub servidor
+    int connectionsPoll;  //poll para ouvir mensagens de todos clientes
 
 
-    vector<thread> sendThreads;
+    vector<thread> sendThreads; //threads que escutam o poll 'connectionsPoll'
 
     void atenderClientes();
     size_t PassMsg(int connectionFileDescriptor,char msg[], size_t buffer_len, int FLAG);
     void HandleAnswers(size_t subServerIdx);
+    bool _reconnectToSubServer(size_t subServerIdx);
     void ConnectToSubServers();
+    bool isSubServerUp(size_t subServerIdx) { return upServers[subServerIdx]; }
 
     static void my_signal_handler(int signal);
     static SuperServer *instance;

@@ -5,6 +5,8 @@
 
 #include <stdio.h>
 #include <sys/epoll.h>
+#include <thread>
+#include <chrono>
 
 #include "SuperServer.h"
 #include "signal.h"
@@ -15,20 +17,53 @@ using namespace std;
 
 SuperServer* SuperServer::instance;
 
+bool SuperServer::_reconnectToSubServer(size_t subServerIdx){
+
+    subSockfd[subServerIdx] = socket(AF_INET6, SOCK_STREAM, 0);
+    if(subSockfd[subServerIdx] < 0){
+        printf(YEL("nao foi possivel recriar socket para SubServidor %lu, porta %i\n"), subServerIdx, addr[subServerIdx].sin6_port);
+        fflush(stdout);
+        return false;
+    }
+
+    while(true){
+
+        if (connect(subSockfd[subServerIdx], (struct sockaddr *)&addr[subServerIdx], sizeof(struct sockaddr_in6))){
+            this_thread::sleep_for(chrono::seconds(5) ); //dorme por 5 seg se nao conseguir se reconectar
+            continue;
+        }
+        upServers[subServerIdx] = true;
+        printf(GRN("Reconectado ao SubServidor %lu, porta %i\n"), subServerIdx,addr[subServerIdx].sin6_port);
+        return true;
+    }
+    
+}
+void SuperServer::ConnectToSubServers(){
+    for (int i = 0; i < subSockfd.size(); i++){
+        if (connect(subSockfd[i], (struct sockaddr *)&addr[i], sizeof(struct sockaddr_in6))){
+            perror(RED("Nao foi possivel se conectar ao servidor"));
+            close(subSockfd[i]);
+            exit(2);
+        }
+        upServers[i] = true;
+        printf(GRN("Conectado ao SubServidor %d, porta %i\n"), i,addr[i].sin6_port);
+    }
+
+}
+
 SuperServer::SuperServer(int porta, vector<int> portaSubServers){
 
     sockfd = socket(Domain, type, ipProtocol);
 
     //cancela o construtor com uma exceção
-    if (sockfd < 0)
-    {
+    if (sockfd < 0){
         perror(BOLD(RED("Erro ao criar socket\n")));
-        throw("");
+        throw "constructor error";
     }
     serverAddr.sin6_family = AF_INET6;
-    // htonl() -> converte um short sem sinal de host byte order para network byte order ( o que é isso?, nao faço ideia)
+    // htonl() -> converte um short sem sinal de host byte order para network byte order
     serverAddr.sin6_port = htons((ushort)porta);
-    serverAddr.sin6_addr = in6addr_any; //ou gethostbyname("localhost");
+    serverAddr.sin6_addr = in6addr_any;
 
     cout << GRN("Socket criado") << endl;
 
@@ -38,6 +73,7 @@ SuperServer::SuperServer(int porta, vector<int> portaSubServers){
 
     subSockfd.resize(portaSubServers.size());
     addr.resize(portaSubServers.size());
+    upServers.resize(portaSubServers.size());
 
     //conecta-se como cliente, em cada um dos subServidores
     for(int i=0; i<portaSubServers.size(); i++){
@@ -47,7 +83,14 @@ SuperServer::SuperServer(int porta, vector<int> portaSubServers){
             perror(RED("Erro ao criar socket\n"));
             exit(2);
         }
-        printf(GRN("Socket para SubServer criado\n"));
+        printf(GRN("Socket para SubServer %d criado\n"), i);
+
+        int *on = new int;
+        *on = 1;
+        if (setsockopt(subSockfd[i], SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, (char *)on, sizeof(int)) < 0) {
+            perror("setsockopt(SO_REUSEADDR) failed");
+            exit(0);
+        }
 
         //inicializando valores de addr.sin6
         memset(&addr[i], 0, sizeof(addr));
@@ -72,98 +115,36 @@ SuperServer::SuperServer(int porta, vector<int> portaSubServers){
     instance = this;
 }
 
-
-//le e processa as mensagens dos clientes. sem realação de "designar" uma thread para unico cliente ou vice-versa
-void SuperServer::atenderClientes(){
-
-    bool continuar = true;
-    while (continuar){
-
-        char buffer[2056] = {0};
-
-        sigset_t signalMask;
-        epoll_event event;
-        epoll_pwait(connectionsPoll, &event, 1, -1, &signalMask); //espera pela chegada de alguma mensagem em alguma das conexões
-        int totalBytes = recv(event.data.fd, buffer, sizeof(buffer), 0);
-
-        switch (totalBytes){
-        case -1:
-            perror(RED("erro ao receber mensagem do cliente"));
-            continue;
-        case 0:
-            perror(YEL("o cliente fechou a conexão antes que todos os dados fossem enviados"));
-            //continuar = false;
-            continue;
-        default:
-            cout << totalBytes << " Bytes recebidos --> ";
-            printf("\"%s\"\n", buffer);
-        }
-
-        if (!strcmp(buffer, "bye") || !strcmp(buffer, "exit")){ //cliente quer parar a conexão
-            //continuar = false;
-            strcpy(buffer, "Bye!");
-            send(event.data.fd, buffer, strlen(buffer) + 1, MSG_NOSIGNAL);
-            printf(BOLD(YEL("\tFim de conexão com cliente\n")));
-            //shutdown(event.data.fd, SHUT_RD); //fecha socket para recebimento de dados
-            close(event.data.fd);
-        }
-        else{
-            //totalBytes = send(connectionfd, buffer, strlen(buffer) + 1, MSG_NOSIGNAL);
-            totalBytes = PassMsg(event.data.fd, buffer, strlen(buffer) + 1 ,MSG_NOSIGNAL);   //passa a mensagem para algum subservidor
-            if (totalBytes == -1){
-                perror(YEL("Erro ao reeencaminhar mensagem"));
-                break;
-            }
-            else
-                cout << CYN("mensagem reeencaminhada") << endl;
-        }
-        
-    }
-
-    //shutdown(connectionfd, SHUT_RDWR); //fecha socket para receber e enviar dados
-    //printf(BOLD(YEL("Fim da conexão\n")));
-}
-
 void SuperServer::Start(){
     
-    //conecta aos subServidores
-    SuperServer::ConnectToSubServers();
-
     //"amarra"/seta o socket
     int bind_result = bind(Server::sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr));
     if (bind_result < 0){
         perror(RED("bind() falhou"));
-        return;
+        throw "bind error";
     }
+
+    //conecta aos subServidores
+    SuperServer::ConnectToSubServers();
 
     //inicia uma thread para cada subservidor, que vai tratar das respostas dele
     Sthreads.resize(subSockfd.size());
-    for (thread &thrd: Sthreads){
+    for (int i=0; i<Sthreads.size(); i++){
         Sthreads[i] = thread(&SuperServer::HandleAnswers, this, i);
     }
 }
 
-void SuperServer::ConnectToSubServers(){
-    for (int i = 0; i < subSockfd.size(); i++){
-        if (connect(subSockfd[i], (struct sockaddr *)&addr[i], sizeof(struct sockaddr_in6))){
-            perror(RED("Nao foi possivel se conectar ao servidor"));
-            close(subSockfd[i]);
-            exit(2);
-        }
-        printf(GRN("Conectado ao SubServidor %d, porta %i\n"), i,addr[i].sin6_port);
-    }
-
-}
+/* 'listen' o socket e cria poll para tratar dos clientes */
 void SuperServer::Listen(size_t buffer_connection_size = 50, size_t numThreads = NUM_LISTENER_THREADS){
     //listen for a connection request
     if (listen(sockfd, buffer_connection_size) < 0){
         perror(RED("listen() falhou"));
-        return;
+        throw "listen error";
     }
     cout << GRN("Pronto para conexão com Clientes") << endl;
 
- /******adiciona socket ao poll ******/
-    connectionsPoll = epoll_create(subSockfd.size());
+ /******cria poll  ******/
+    connectionsPoll = epoll_create1(0);
 
     if(connectionsPoll <0){
         perror(RED("Erro ao criar poll de sockets"));
@@ -198,6 +179,7 @@ void SuperServer::Accept(){
 
     struct epoll_event *event = new epoll_event;
     event->events = EPOLLIN | EPOLLET;
+    //event->events = EPOLLIN;
     event->data.fd = connectionfd;
 
     if(epoll_ctl(connectionsPoll, EPOLL_CTL_ADD, event->data.fd, event)<0){
@@ -208,11 +190,60 @@ void SuperServer::Accept(){
     //this->atenderClientes(connectionfd, clientAddr, addrLen);
 }
 
+//le e processa as mensagens dos clientes. sem realação de "amarrar" uma thread para unico cliente ou vice-versa
+void SuperServer::atenderClientes(){
+    char buffer[2056] = {0};
+
+    sigset_t signalMask;
+    epoll_event event;
+
+    while (true){
+        //espera pela chegada de alguma mensagem no poll, apenas um por vez
+        epoll_pwait(connectionsPoll, &event, 1, -1, &signalMask);
+        int totalBytes = recv(event.data.fd, buffer, sizeof(buffer), 0);
+
+        switch (totalBytes){
+        case -1:
+            perror(RED("erro ao receber mensagem do cliente"));
+            continue;
+        case 0:
+            perror(YEL("o cliente fechou a conexão antes que todos os dados fossem enviados"));
+            epoll_ctl(connectionsPoll, EPOLL_CTL_DEL, event.data.fd, &event);
+            close(event.data.fd);
+            continue;
+        default:
+            cout << totalBytes << " Bytes recebidos --> ";
+            printf("\"%s\"\n", buffer);
+        }
+
+        if (!strcmp(buffer, "bye") || !strcmp(buffer, "exit")){ //cliente quer parar a conexão
+            strcpy(buffer, "Bye!");
+            send(event.data.fd, buffer, strlen(buffer) + 1, MSG_NOSIGNAL);
+            printf(BOLD(YEL("\tFim de conexão com cliente\n")));
+            epoll_ctl(connectionsPoll, EPOLL_CTL_DEL, event.data.fd, &event);
+            close(event.data.fd);   //fecha o socket com cliente
+        }
+        else{
+            
+            totalBytes = PassMsg(event.data.fd, buffer, strlen(buffer) + 1 ,MSG_NOSIGNAL);   //passa a mensagem para algum subservidor
+            if (totalBytes == -1)
+                perror(YEL("Erro ao reencaminhar mensagem"));
+            else
+                cout << CYN("\tmensagem reencaminhada para SubServer") << endl;
+        }
+        
+    }
+
+    //printf(BOLD(YEL("Fim da conexão\n")));
+}
 
 size_t SuperServer::PassMsg(int connectionFileDescriptor, char msg[], size_t buffer_len, int FLAG){
     static int SubServerIdx = 0;
 
-    SubServerIdx = ++SubServerIdx % subSockfd.size();
+    //seleciona apenas servidores em pé ( que nao cairam )
+    do{
+        SubServerIdx = ++SubServerIdx % subSockfd.size();
+    }while(isSubServerUp(SubServerIdx) == false );
 
     //enviar o descritor da conexão + mensagem original
     char _msg[buffer_len + sizeof(int)];
@@ -228,7 +259,7 @@ size_t SuperServer::PassMsg(int connectionFileDescriptor, char msg[], size_t buf
 void SuperServer::HandleAnswers(size_t subServerIdx){
     constexpr size_t buff_size = 1024;
     char bufferIn[buff_size];
-    char bufferOut[buff_size];
+    //char bufferOut[buff_size];
 
     size_t total_bytes;
     int clientSockFd;
@@ -242,19 +273,24 @@ void SuperServer::HandleAnswers(size_t subServerIdx){
             printf(YEL("erro ao receber mensagem do SubServidor %lu"), subServerIdx);perror("");
             continue;
         case 0:
-            printf(RED("o SubServidor %lu fechou a conexão antes que todos os dados fossem enviados"), subServerIdx);perror((""));
-            return;
+            printf(RED("o SubServidor %lu fechou a conexão\t aguardando reconexão\n"), subServerIdx);
+            fflush(stdout);
+
+            //indica subservidor como indisponivel e tenta reconectar
+            upServers[subServerIdx] = false; //"flag" para indicar que subServidor n ta online
+            close(subSockfd[subServerIdx]);
+            if(_reconnectToSubServer(subServerIdx) == false)  //tenta reconectar ao servidor
+                return;
+            continue;
         default:
-            cout << total_bytes << " Bytes recebidos de SubServ. "<<subServerIdx<<" --> ";
-            printf("\"%s\"\n", bufferIn+sizeof(int));
+            cout << total_bytes << " Bytes recebidos de SubServ. "<<subServerIdx<<endl;
+            //encaminhar msg para cliente original;
+            send(clientSockFd, bufferIn+sizeof(int), strlen(bufferIn+sizeof(int))+1, 0);
+            printf(CYN("\tmensagem reencaminhada para Cliente\n\n"));
         }
 
-        //encaminhar msg para cliente original;
-        //sprintf(bufferOut, "Resposta da msg \"%s\", realizada pelo subServer %u", bufferIn+sizeof(int), subServerIdx);
-        send(clientSockFd, bufferIn+sizeof(int), strlen(bufferIn+sizeof(int))+1, 0);
     }
 }
-
 
 void SuperServer::Close(){
 
@@ -265,15 +301,14 @@ void SuperServer::Close(){
     printf("\t" BOLD("`") "->Finalizando recevier-threads(SubServer receiver) 0 a %lu\n", Sthreads.size() - 1);
     for (int i = 0; i < Sthreads.size(); i++)
         pthread_cancel(Sthreads[i].native_handle());
+
     printf("\t" BOLD("`") "->Desconectando dos subServers 0 a %lu", subSockfd.size() - 1);
     for(size_t i=0; i<subSockfd.size(); i++)
         close(subSockfd[i]);
-    
-
 
     close(connectionsPoll);
-    close(Server::sockfd);
     close(Server::connectionfd);
+    close(Server::sockfd);
 }
 
 SuperServer::~SuperServer(){
@@ -307,14 +342,13 @@ int main(int argc, char *argv[]){
     }
 
     try{
-
-    /******** Criando o Servidor main e seu socket, *****
-     ******* e conectando-o aos subServidores***********/
+    /*      Criando o Servidor main e seus sockets,  */
         class SuperServer servidor(atoi(argv[1]), subServersPorts);
 
 
     /***************Iniciando servidor*********************/
-        servidor.Start();
+
+        servidor.Start(); /*   conectando aos subServidores    */
         servidor.Listen();
         while (true)
             servidor.Accept();
@@ -323,7 +357,6 @@ int main(int argc, char *argv[]){
     catch (exception ex){
         cout << "Erro ao construir objeto" << endl;
     }
-
 
     return 0;
 }

@@ -1,3 +1,7 @@
+/** @author: João Gabriel Silva Fernandes
+ * @email: jgabsfernandes@gmail.com
+ * 
+*/
 #include "Server.h"
 
 
@@ -16,7 +20,7 @@ class SubServer: public Server{
     SubServer(int porta);
     ~SubServer();
     virtual void Start();
-    virtual void Listen(size_t listen_buffer_size = 20);
+    virtual void Listen(size_t listen_buffer_size);
     virtual void Accept();
     virtual void Close();
 
